@@ -1,0 +1,22 @@
+# Core web framework & real-time comms
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+websockets==13.1
+
+# Speech-to-text (fully local)
+faster-whisper==1.0.3
+pydub==0.25.1
+
+# Audio analysis (voice detection, STT processing)
+numpy==1.26.4
+librosa==0.10.2.post1
+soundfile==0.12.1
+
+# HTTP client for LLM APIs
+requests==2.32.3
+
+# File uploads & forms
+python-multipart==0.0.9
+
+# HTTPS certificate generation (for LAN testing)
+cryptography==43.0.1

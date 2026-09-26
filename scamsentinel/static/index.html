@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ScamSentinel</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- ============ LOBBY ============ -->
+<section id="lobby" class="screen">
+  <div class="lobby-card">
+    <div class="brand">
+      <span class="brand-mark">◈</span>
+      <span class="brand-name">ScamSentinel</span>
+    </div>
+    <p class="lobby-tag">Live call protection. Runs entirely on your machine.</p>
+
+    <label class="field">
+      <span>Your name</span>
+      <input id="username-input" type="text" placeholder="e.g. Asha" autocomplete="off" />
+    </label>
+
+    <div class="lobby-actions">
+      <button id="create-room-btn" class="btn btn-primary">Create a call</button>
+      <div class="or-divider"><span>or join one</span></div>
+      <div class="join-row">
+        <input id="room-input" type="text" placeholder="Room code" autocomplete="off" />
+        <button id="join-room-btn" class="btn btn-secondary">Join</button>
+      </div>
+    </div>
+
+    <button id="demo-scam-btn" class="btn btn-ghost">Run demo: suspicious call</button>
+    <button id="demo-normal-btn" class="btn btn-ghost">Run demo: normal call</button>
+
+    <p class="lobby-note" id="lobby-note"></p>
+  </div>
+</section>
+
+<!-- ============ CALL SCREEN ============ -->
+<section id="call-screen" class="screen hidden">
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="brand-mark small">◈</span>
+      <span class="brand-name small">ScamSentinel</span>
+      <span class="room-chip">Room <b id="room-label"></b></span>
+    </div>
+    <div class="topbar-right">
+      <span class="status-dot" id="conn-dot"></span>
+      <span id="conn-text">Connecting…</span>
+      <span class="duration" id="call-duration">00:00</span>
+    </div>
+  </header>
+
+  <main class="call-layout">
+    <!-- Left: call stage -->
+    <section class="stage">
+      <div class="participants">
+        <div class="participant-card" id="card-self">
+          <div class="avatar" id="avatar-self">?</div>
+          <div class="p-name" id="name-self">You</div>
+          <div class="p-status" id="mic-status-self">Mic live</div>
+        </div>
+        <div class="participant-card" id="card-peer">
+          <div class="avatar" id="avatar-peer">?</div>
+          <div class="p-name" id="name-peer">Waiting for peer…</div>
+          <div class="p-status" id="mic-status-peer">—</div>
+        </div>
+      </div>
+
+      <div class="analysis-indicator" id="analysis-indicator">
+        <span class="pulse-dot"></span> AI analysis active — listening for scam and voice-cloning signals
+      </div>
+      <div class="diagnostics-line" id="diagnostics-line"></div>
+
+      <div class="controls">
+        <button id="mute-btn" class="ctrl-btn" title="Mute">🎤</button>
+        <button id="leave-btn" class="ctrl-btn ctrl-leave" title="Leave call">⏹ Leave</button>
+      </div>
+
+      <audio id="remote-audio" autoplay playsinline></audio>
+    </section>
+
+    <!-- Right: security console -->
+    <aside class="console">
+      <div class="risk-block">
+        <div class="risk-row">
+          <div class="risk-meter">
+            <div class="risk-label">SCAM RISK</div>
+            <div class="risk-value" id="scam-risk-level">LOW</div>
+            <div class="risk-bar-track"><div class="risk-bar-fill" id="scam-risk-bar"></div></div>
+            <div class="risk-confidence" id="scam-risk-confidence">0% confidence</div>
+            <div class="risk-confidence" id="scam-risk-backend">Local heuristic</div>
+          </div>
+          <div class="risk-meter">
+            <div class="risk-label">AI VOICE</div>
+            <div class="risk-value" id="voice-risk-level">—</div>
+            <div class="risk-bar-track"><div class="risk-bar-fill voice" id="voice-risk-bar"></div></div>
+            <div class="risk-confidence" id="voice-risk-confidence">Listening for ~5s sample…</div>
+          </div>
+        </div>
+        <p class="disclaimer">AI voice detection is experimental and may produce false positives/negatives. It is a heuristic signal, not proof.</p>
+      </div>
+
+      <div class="reasons-block" id="reasons-block">
+        <div class="reasons-title">Why</div>
+        <ul id="reasons-list" class="reasons-list"><li class="reasons-empty">No suspicious signals detected yet.</li></ul>
+      </div>
+
+      <div id="alert-banner" class="alert-banner hidden">
+        <div class="alert-title">⚠ HIGH SCAM RISK</div>
+        <div class="alert-body">The other party appears to be requesting sensitive financial information or creating urgency.</div>
+        <div class="alert-dont">
+          <div>DO NOT SHARE:</div>
+          <div>OTP · PIN · CVV · Passwords · Banking credentials</div>
+        </div>
+      </div>
+
+      <div class="transcript-block">
+        <div class="transcript-title">Live transcript</div>
+        <div class="transcript-feed" id="transcript-feed"></div>
+      </div>
+    </aside>
+  </main>
+</section>
+
+<!-- ============ CALL SUMMARY ============ -->
+<section id="summary-screen" class="screen hidden">
+  <div class="summary-card">
+    <h1>Call summary</h1>
+    <div class="summary-grid">
+      <div class="summary-stat"><span class="stat-label">Duration</span><span class="stat-value" id="sum-duration">—</span></div>
+      <div class="summary-stat"><span class="stat-label">Max scam risk</span><span class="stat-value" id="sum-risk">—</span></div>
+      <div class="summary-stat"><span class="stat-label">Peak confidence</span><span class="stat-value" id="sum-confidence">—</span></div>
+    </div>
+    <div class="summary-section">
+      <h2>Suspicious events</h2>
+      <ul id="sum-events" class="reasons-list"><li class="reasons-empty">None detected.</li></ul>
+    </div>
+    <div class="summary-section">
+      <h2>Full transcript</h2>
+      <div class="transcript-feed" id="sum-transcript"></div>
+    </div>
+    <button id="new-call-btn" class="btn btn-primary">Start a new call</button>
+  </div>
+</section>
+
+<script src="app.js"></script>
+</body>
+</html>
