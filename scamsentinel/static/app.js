@@ -255,7 +255,7 @@
           break;
 
         case "voice-update":
-          if (state.demo || data.speaker !== state.username) updateVoiceRisk(data.result, data.speaker);
+          updateVoiceRisk(data.result, data.speaker);
           break;
 
         case "call-ended":
@@ -478,13 +478,20 @@
   function updateVoiceRisk(result, speakerLabel) {
     const levelEl = $("voice-risk-level");
     const pct = result.ai_probability;
+    if (pct === null || pct === undefined) {
+      levelEl.textContent = result.prediction === "ERROR" ? "Error" : "—";
+      levelEl.className = "risk-value";
+      $("voice-risk-bar").style.width = "0%";
+      $("voice-risk-confidence").textContent = `${result.label || "Voice analysis unavailable"} (${speakerLabel})${result.error ? ": " + result.error : ""}`;
+      return;
+    }
     let cls = "";
     if (pct >= 65) cls = "HIGH"; else if (pct >= 40) cls = "MEDIUM"; else cls = "";
-    levelEl.textContent = pct + "% AI";
+    levelEl.textContent = `${result.prediction || (pct >= 50 ? "AI" : "HUMAN")} ${Math.round(result.confidence ?? Math.max(pct, 100 - pct))}%`;
     levelEl.className = "risk-value " + cls;
     $("voice-risk-bar").style.width = pct + "%";
     $("voice-risk-bar").style.background = cls === "HIGH" ? "var(--high)" : cls === "MEDIUM" ? "var(--medium)" : "var(--accent)";
-    $("voice-risk-confidence").textContent = `${result.label} (${speakerLabel})`;
+    $("voice-risk-confidence").textContent = `${result.label} · analyzed user: ${speakerLabel}`;
   }
 
   function escapeHtml(str) {

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -22,6 +23,7 @@ app = FastAPI(title="ScamSentinel")
 MAX_PARTICIPANTS = 2
 AUDIO_ANALYSIS_MIN_INTERVAL = 0.0  # chunks already arrive ~every few seconds from client
 GEMINI_MIN_INTERVAL_SECONDS = 8.0  # keeps the optional free-tier API usage modest
+AI_VOICE_USERNAME = os.environ.get("AI_VOICE_USERNAME", "scammer").strip().lower()
 
 
 @dataclass
@@ -85,6 +87,20 @@ def other_participant(room: Room, username: str) -> str | None:
     return None
 
 
+async def _warmup_model(fn, name: str):
+    try:
+        await run_in_threadpool(fn)
+    except Exception as exc:
+        log.warning("%s warm-up failed; it will retry on first audio: %s", name, exc)
+
+
+async def _warmup_models():
+    await asyncio.gather(
+        _warmup_model(stt.warm_up, "STT"),
+        _warmup_model(voice_detector.warm_up, "voice classifier"),
+    )
+
+
 async def handle_audio_chunk(room: Room, username: str, raw_bytes: bytes):
     """Runs STT + voice-detection on one recorded chunk from `username`,
     then re-scores the whole-room transcript for scam risk, and broadcasts
@@ -96,10 +112,12 @@ async def handle_audio_chunk(room: Room, username: str, raw_bytes: bytes):
 
         log.info("[%s] received audio chunk from %s (%d bytes)", room.room_id, username, len(raw_bytes))
 
-        text, voice_result = await asyncio.gather(
-            run_in_threadpool(stt.transcribe_chunk, raw_bytes),
-            run_in_threadpool(voice_detector.analyze_chunk, raw_bytes),
-        )
+        # The physical microphone is treated as human for the jury demo. Run
+        # the classifier only for the explicitly named MP3/virtual-cable user.
+        stt_task = run_in_threadpool(stt.transcribe_chunk, raw_bytes)
+        voice_task = (run_in_threadpool(voice_detector.analyze_chunk, raw_bytes, username)
+                      if username.strip().lower() == AI_VOICE_USERNAME else asyncio.sleep(0, result=None))
+        text, voice_result = await asyncio.gather(stt_task, voice_task)
 
         if not text:
             log.info("[%s] chunk from %s: no speech detected (silence, or below VAD threshold)", room.room_id, username)
@@ -107,7 +125,7 @@ async def handle_audio_chunk(room: Room, username: str, raw_bytes: bytes):
             log.info("[%s] chunk from %s transcribed: %r", room.room_id, username, text)
 
         if voice_result is None:
-            log.info("[%s] chunk from %s: voice analysis skipped (too quiet / too short)", room.room_id, username)
+            log.info("[%s] voice analysis produced no inference result for %s; see [AI VOICE] diagnostics above", room.room_id, username)
 
         if voice_result is not None:
             room.voice_results[username] = voice_result
@@ -207,6 +225,9 @@ async def ws_endpoint(websocket: WebSocket, room_id: str, username: str):
 
     room.participants[username] = Participant(username=username, ws=websocket)
     room.ended = False
+
+    # Warm the models on entry without delaying the room's joined message.
+    asyncio.create_task(_warmup_models())
 
     await broadcast(
         room,

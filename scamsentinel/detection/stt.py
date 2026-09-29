@@ -20,6 +20,15 @@ _model_name = os.environ.get("WHISPER_MODEL", "base.en")
 _ffmpeg_available: bool | None = None
 
 
+def _transcribe_with_google(samples: np.ndarray) -> str:
+    """Fast demo STT using SpeechRecognition's Google endpoint."""
+    import speech_recognition as sr
+    pcm = np.clip(samples * 32767, -32768, 32767).astype(np.int16).tobytes()
+    audio = sr.AudioData(pcm, 16000, 2)
+    recognizer = sr.Recognizer()
+    return recognizer.recognize_google(audio, language="en-US").strip()
+
+
 def _check_ffmpeg() -> bool:
     global _ffmpeg_available
     if _ffmpeg_available is not None:
@@ -40,6 +49,11 @@ def _get_model():
         log.info("Loading faster-whisper model %s (first run downloads it once)", _model_name)
         _model = WhisperModel(_model_name, device="cpu", compute_type="int8")
     return _model
+
+
+def warm_up() -> None:
+    """Load the local STT model before the first audio chunk."""
+    _get_model()
 
 
 def _decode_ffmpeg(raw_bytes: bytes) -> np.ndarray:
@@ -128,7 +142,16 @@ def transcribe_chunk(raw_bytes: bytes) -> str:
     if rms < float(os.environ.get("WHISPER_MIN_RMS", "0.0015")):
         return ""
     try:
-        text = _transcribe_with_faster_whisper(samples)
+        # SpeechRecognition is faster and more forgiving for a short jury
+        # demo. Set STT_ENGINE=whisper to force fully-local transcription.
+        if os.environ.get("STT_ENGINE", "speech_recognition").lower() in {"speech_recognition", "google"}:
+            try:
+                text = _transcribe_with_google(samples)
+            except Exception as exc:
+                log.warning("SpeechRecognition unavailable; falling back to local Whisper: %s", exc)
+                text = _transcribe_with_faster_whisper(samples)
+        else:
+            text = _transcribe_with_faster_whisper(samples)
         if text:
             log.info("Transcribed: %r", text)
         return text

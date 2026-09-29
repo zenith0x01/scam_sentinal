@@ -1,133 +1,124 @@
-"""
-Experimental AI/synthetic-voice heuristic.
-
-IMPORTANT HONESTY NOTE: this is NOT a trained deep-learning deepfake
-classifier (those require large labeled datasets and GPUs to run in real
-time, which contradicts the "runs free on a normal laptop" requirement).
-Instead this is a signal-processing heuristic that looks at acoustic
-properties which tend to differ between natural human speech and
-TTS/vocoder output on average:
-
-  - pitch (f0) jitter: natural voices have small, irregular frame-to-frame
-    pitch fluctuations from imperfect vocal-fold vibration; many TTS/vocoder
-    systems produce an unnaturally smooth or unnaturally regular pitch
-    contour.
-  - amplitude shimmer: similar idea for loudness micro-variation.
-  - spectral flatness / noise floor: natural recordings usually carry more
-    broadband noise (breath, room, mic self-noise) than clean vocoder
-    output.
-  - harmonic energy concentration: vocoders often concentrate energy very
-    tightly around harmonics with an unnaturally low noise floor between
-    them.
-
-None of these signals is individually reliable, and combined they are still
-a heuristic, not a validated classifier -- hence "experimental" everywhere
-in the UI. This is explicitly called out to the end user, exactly as the
-product spec requires.
-"""
-
+"""Pretrained audio deepfake classifier used for the configured demo stream."""
 from __future__ import annotations
 
 import logging
+import os
+import threading
 
 import numpy as np
-import librosa
-
 from .stt import decode_audio_bytes
 
 log = logging.getLogger("scamsentinel")
+MODEL_ID = os.getenv("VOICE_DETECTOR_MODEL", "Vansh180/deepfake-audio-wav2vec2")
+SAMPLE_RATE = 16000
+MIN_DURATION_SECONDS = 0.8
+MIN_RMS = 0.00035
+_model = _processor = _torch = _load_error = None
+_lock = threading.Lock()
 
 
-def _decode_to_mono_16k(raw_bytes: bytes) -> np.ndarray:
-    # Use the exact same WebM/Opus decoder as STT. Previously this had a
-    # second pydub-only decoder, so voice analysis failed on chunks that STT
-    # could decode through ffmpeg.
-    return decode_audio_bytes(raw_bytes)
+def _load_model():
+    global _model, _processor, _torch, _load_error
+    if _model is not None:
+        return _processor, _model, _torch
+    if _load_error is not None:
+        raise _load_error
+    with _lock:
+        if _model is not None:
+            return _processor, _model, _torch
+        try:
+            import torch
+            from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
+
+            log.info("[AI VOICE] loading model=%s", MODEL_ID)
+            _processor = AutoFeatureExtractor.from_pretrained(MODEL_ID)
+            _model = AutoModelForAudioClassification.from_pretrained(MODEL_ID)
+            _model.eval()
+            _torch = torch
+            log.info("[AI VOICE] model loaded labels=%s expected_sample_rate=%s", _model.config.id2label, getattr(_processor, "sampling_rate", "unknown"))
+            return _processor, _model, _torch
+        except Exception as exc:
+            _load_error = exc
+            log.exception("[AI VOICE] model load failed: %s", exc)
+            raise
 
 
-def _safe(v, default=0.0):
-    return float(v) if np.isfinite(v) else default
+def warm_up() -> None:
+    """Load the model before analysis begins."""
+    _load_model()
 
 
-def analyze_chunk(raw_bytes: bytes) -> dict | None:
-    """Returns {"ai_probability": 0-100, "natural_probability": 0-100,
-    "label": str, "features": {...}} or None if the chunk had no usable
-    voiced speech."""
+def analyze_chunk(raw_bytes: bytes, username: str = "unknown") -> dict | None:
+    """Decode and classify one WebM/MP3/PCM chunk; output scores from model logits."""
+    user = username or "unknown"
     try:
-        y = _decode_to_mono_16k(raw_bytes)
-    except Exception as e:
-        log.warning("voice-detector audio decode failed: %s", e)
+        samples = decode_audio_bytes(raw_bytes)
+    except Exception as exc:
+        log.exception("[AI VOICE] user=%s audio decode failed bytes=%d: %s", user, len(raw_bytes), exc)
         return None
 
-    if y.size < 16000 * 0.8:  # need at least ~0.8s of audio
-        return None
-    if float(np.abs(y).mean()) < 0.0008:  # near silence
+    if samples.size == 0:
+        log.warning("[AI VOICE] user=%s invalid/empty decoded audio bytes=%d", user, len(raw_bytes))
         return None
 
-    sr = 16000
+    # decode_audio_bytes returns mono float samples resampled to 16 kHz.
+    samples = np.nan_to_num(samples.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    duration = samples.size / SAMPLE_RATE
+    rms = float(np.sqrt(np.mean(np.square(samples), dtype=np.float64)))
+    peak = float(np.max(np.abs(samples)))
+    log.info("[AI VOICE] user=%s decoded duration=%.2fs sample_rate=%d channels=1 rms=%.6f peak=%.6f", user, duration, SAMPLE_RATE, rms, peak)
+
+    if duration < MIN_DURATION_SECONDS:
+        log.info("[AI VOICE] user=%s skipped: duration %.2fs below %.2fs minimum", user, duration, MIN_DURATION_SECONDS)
+        return None
+    if rms < MIN_RMS or peak < MIN_RMS * 2:
+        log.info("[AI VOICE] user=%s skipped: low audio level rms=%.6f peak=%.6f thresholds=(%.6f, %.6f)", user, rms, peak, MIN_RMS, MIN_RMS * 2)
+        return None
 
     try:
-        f0, voiced_flag, _voiced_prob = librosa.pyin(
-            y, fmin=librosa.note_to_hz("C2"), fmax=librosa.note_to_hz("C6"), sr=sr
-        )
-    except Exception:
-        return None
+        processor, model, torch = _load_model()
+        model_rate = int(getattr(processor, "sampling_rate", SAMPLE_RATE))
+        if model_rate != SAMPLE_RATE:
+            raise ValueError(f"decoder supplied {SAMPLE_RATE} Hz but model expects {model_rate} Hz")
 
-    voiced = f0[voiced_flag] if voiced_flag is not None else np.array([])
-    if voiced.size < 5:
-        return None  # not enough voiced frames to say anything meaningful
+        encoded = processor(samples, sampling_rate=SAMPLE_RATE, return_tensors="pt", padding=True)
+        model_input = encoded.get("input_values")
+        if model_input is None or model_input.ndim != 2 or model_input.shape[0] != 1:
+            raise ValueError(f"unexpected processor output; input_values shape={getattr(model_input, 'shape', None)}")
+        shape = tuple(int(dim) for dim in model_input.shape)
+        log.info("[AI VOICE] user=%s model_input_shape=%s sample_rate=%d duration=%.2fs", user, shape, model_rate, duration)
+        log.info("[AI VOICE] user=%s inference started", user)
+        with torch.inference_mode():
+            logits = model(**encoded).logits[0]
+            probabilities = torch.softmax(logits, dim=-1).cpu().numpy()
 
-    # --- pitch jitter: relative frame-to-frame change, robust to octave ---
-    diffs = np.abs(np.diff(voiced)) / np.maximum(voiced[:-1], 1e-6)
-    jitter = _safe(np.median(diffs), 0.0)  # natural speech: roughly 0.01-0.06+
+        labels = model.config.id2label
+        label_scores = {str(labels.get(index, f"LABEL_{index}")).strip().lower(): float(probabilities[index]) for index in range(len(probabilities))}
+        fake_labels = {label: score for label, score in label_scores.items() if any(token in label for token in ("fake", "synthetic", "spoof", "deepfake"))}
+        real_labels = {label: score for label, score in label_scores.items() if any(token in label for token in ("real", "human", "bonafide", "bona fide", "natural", "genuine"))}
+        if not fake_labels or not real_labels:
+            raise ValueError(f"model labels cannot be mapped to AI/HUMAN: {labels}")
 
-    # --- amplitude shimmer on RMS envelope ---
-    rms = librosa.feature.rms(y=y, frame_length=1024, hop_length=256)[0]
-    rms = rms[rms > 1e-6]
-    shimmer = 0.0
-    if rms.size > 5:
-        rdiffs = np.abs(np.diff(rms)) / np.maximum(rms[:-1], 1e-6)
-        shimmer = _safe(np.median(rdiffs), 0.0)
-
-    # --- spectral flatness (noise floor proxy) ---
-    flatness = _safe(np.mean(librosa.feature.spectral_flatness(y=y)), 0.0)
-
-    # --- noise floor between harmonics: low-energy percentile of spectrum ---
-    S = np.abs(librosa.stft(y, n_fft=1024, hop_length=256))
-    noise_floor = _safe(np.percentile(S, 10) / (np.percentile(S, 90) + 1e-6), 0.0)
-
-    # Heuristic combination. Each term is roughly normalized to a "typical
-    # natural speech" range from general acoustic-phonetics observations;
-    # low jitter/shimmer/noise_floor push the score toward "AI-generated".
-    jitter_score = np.clip(1.0 - (jitter / 0.035), 0.0, 1.0)       # low jitter -> synthetic-ish
-    shimmer_score = np.clip(1.0 - (shimmer / 0.12), 0.0, 1.0)      # low shimmer -> synthetic-ish
-    noise_floor_score = np.clip(1.0 - (noise_floor / 0.15), 0.0, 1.0)  # very clean -> synthetic-ish
-    flatness_score = np.clip((0.35 - flatness) / 0.35, 0.0, 1.0)   # low flatness (tonal/clean) -> synthetic-ish
-
-    combined = (
-        0.35 * jitter_score
-        + 0.20 * shimmer_score
-        + 0.25 * noise_floor_score
-        + 0.20 * flatness_score
-    )
-    ai_probability = int(round(np.clip(combined, 0.0, 1.0) * 100))
-    natural_probability = 100 - ai_probability
-
-    if ai_probability >= 65:
-        label = "Potential synthetic/AI-generated voice"
-    elif ai_probability >= 40:
-        label = "Uncertain - some unusual acoustic regularity"
-    else:
-        label = "Likely natural human voice"
-
-    return {
-        "ai_probability": ai_probability,
-        "natural_probability": natural_probability,
-        "label": label,
-        "features": {
-            "pitch_jitter": round(jitter, 4),
-            "amplitude_shimmer": round(shimmer, 4),
-            "spectral_flatness": round(flatness, 4),
-            "noise_floor_ratio": round(noise_floor, 4),
-        },
-    }
+        ai_probability = float(np.clip(sum(fake_labels.values()), 0.0, 1.0))
+        human_probability = float(np.clip(sum(real_labels.values()), 0.0, 1.0))
+        is_ai = ai_probability >= human_probability
+        prediction = "AI" if is_ai else "HUMAN"
+        confidence = max(ai_probability, human_probability)
+        log.info("[AI VOICE] user=%s prediction=%s confidence=%.2f%% ai_probability=%.2f%%", user, prediction, confidence * 100, ai_probability * 100)
+        return {
+            "ai_probability": round(ai_probability * 100, 2),
+            "natural_probability": round(human_probability * 100, 2),
+            "prediction": prediction,
+            "confidence": round(confidence * 100, 2),
+            "label": "AI-generated voice detected" if is_ai else "Human voice detected",
+            "model": MODEL_ID,
+            "sample_rate": SAMPLE_RATE,
+            "duration_seconds": round(duration, 2),
+            "model_input_shape": shape,
+            "model_scores": label_scores,
+        }
+    except Exception as exc:
+        log.exception("[AI VOICE] user=%s inference failed: %s", user, exc)
+        return {"ai_probability": None, "natural_probability": None, "prediction": "ERROR", "confidence": None,
+                "label": "Voice classifier failed", "model": MODEL_ID, "error": str(exc),
+                "sample_rate": SAMPLE_RATE, "duration_seconds": round(duration, 2)}
