@@ -1,1 +1,15 @@
-.venv
+.venv/
+.venv.*/
+
+# Python caches and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local environment/secrets
+.env
+.env.*
+
+# Local logs and downloaded model/cache files
+*.log
+.cache/
