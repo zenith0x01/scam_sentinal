@@ -13,7 +13,6 @@ log = logging.getLogger("scamsentinel")
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
 
 from detection import scam_detector, stt, voice_detector
@@ -21,7 +20,6 @@ from detection import scam_detector, stt, voice_detector
 app = FastAPI(title="ScamSentinel")
 
 MAX_PARTICIPANTS = 2
-AUDIO_ANALYSIS_MIN_INTERVAL = 0.0  # chunks already arrive ~every few seconds from client
 GEMINI_MIN_INTERVAL_SECONDS = 8.0  # keeps the optional free-tier API usage modest
 AI_VOICE_USERNAME = os.environ.get("AI_VOICE_USERNAME", "scammer").strip().lower()
 
