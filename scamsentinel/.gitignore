@@ -9,6 +9,8 @@ __pycache__/
 # Local environment/secrets
 .env
 .env.*
+cert.pem
+key.pem
 
 # Local logs and downloaded model/cache files
 *.log

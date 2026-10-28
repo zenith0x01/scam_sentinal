@@ -21,7 +21,6 @@ app = FastAPI(title="ScamSentinel")
 
 MAX_PARTICIPANTS = 2
 GEMINI_MIN_INTERVAL_SECONDS = 8.0  # keeps the optional free-tier API usage modest
-AI_VOICE_USERNAME = os.environ.get("AI_VOICE_USERNAME", "scammer").strip().lower()
 
 
 @dataclass
@@ -42,6 +41,7 @@ class Room:
     all_reasons: set[str] = field(default_factory=set)
     call_start: float = field(default_factory=time.time)
     voice_results: dict[str, dict] = field(default_factory=dict)  # last result per user
+    voice_transcripts: dict[str, str] = field(default_factory=dict)
     last_gemini_request_at: float = 0.0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     ended: bool = False
@@ -99,6 +99,14 @@ async def _warmup_models():
     )
 
 
+@app.on_event("startup")
+async def warm_models_on_server_start() -> None:
+    """Finish STT initialization before the app accepts microphone input."""
+    log.info("Warming speech engines before accepting connections")
+    await _warmup_models()
+    log.info("Speech engines ready")
+
+
 async def handle_audio_chunk(room: Room, username: str, raw_bytes: bytes):
     """Runs STT + voice-detection on one recorded chunk from `username`,
     then re-scores the whole-room transcript for scam risk, and broadcasts
@@ -110,39 +118,34 @@ async def handle_audio_chunk(room: Room, username: str, raw_bytes: bytes):
 
         log.info("[%s] received audio chunk from %s (%d bytes)", room.room_id, username, len(raw_bytes))
 
-        # The physical microphone is treated as human for the jury demo. Run
-        # the classifier only for the explicitly named MP3/virtual-cable user.
         stt_task = run_in_threadpool(stt.transcribe_chunk, raw_bytes)
-        voice_task = (run_in_threadpool(voice_detector.analyze_chunk, raw_bytes, username)
-                      if username.strip().lower() == AI_VOICE_USERNAME else asyncio.sleep(0, result=None))
-        text, voice_result = await asyncio.gather(stt_task, voice_task)
-
+        text = await stt_task
         if not text:
             log.info("[%s] chunk from %s: no speech detected (silence, or below VAD threshold)", room.room_id, username)
         else:
             log.info("[%s] chunk from %s transcribed: %r", room.room_id, username, text)
 
-        if voice_result is None:
-            log.info("[%s] voice analysis produced no inference result for %s; see [AI VOICE] diagnostics above", room.room_id, username)
-
-        if voice_result is not None:
-            room.voice_results[username] = voice_result
-            await broadcast(
-                room,
-                {
-                    "type": "voice-update",
-                    "speaker": username,
-                    "result": voice_result,
-                },
-            )
-
         if text:
             entry = {"speaker": username, "text": text, "ts": time.time()}
             room.transcript.append(entry)
+            # Match every participant's accumulated transcript. Normal human
+            # conversation will not match the three prepared scripts, while a
+            # played demo recording can be detected regardless of username.
+            room.voice_transcripts[username] = (room.voice_transcripts.get(username, "") + " " + text).strip()
+            voice_result = voice_detector.analyze_transcript(room.voice_transcripts[username], username)
+            room.voice_results[username] = voice_result
+            await broadcast(room, {"type": "voice-update", "speaker": username, "result": voice_result})
             await broadcast(room, {"type": "transcript-update", "entry": entry})
 
             lines = [f"USER {e['speaker']}: {e['text']}" for e in room.transcript]
-            use_gemini = time.monotonic() - room.last_gemini_request_at >= GEMINI_MIN_INTERVAL_SECONDS
+            # Keep transcription bandwidth and quota for STT. The local risk
+            # heuristic is immediate; opt into a second Gemini text request
+            # only when explicitly requested with GEMINI_SCAM_ANALYSIS=true.
+            gemini_scam_enabled = os.environ.get("GEMINI_SCAM_ANALYSIS", "").lower() in {"1", "true", "yes"}
+            use_gemini = (
+                gemini_scam_enabled
+                and time.monotonic() - room.last_gemini_request_at >= GEMINI_MIN_INTERVAL_SECONDS
+            )
             if use_gemini:
                 room.last_gemini_request_at = time.monotonic()
             result = await run_in_threadpool(scam_detector.analyze_transcript, lines, use_gemini)
@@ -223,9 +226,6 @@ async def ws_endpoint(websocket: WebSocket, room_id: str, username: str):
 
     room.participants[username] = Participant(username=username, ws=websocket)
     room.ended = False
-
-    # Warm the models on entry without delaying the room's joined message.
-    asyncio.create_task(_warmup_models())
 
     await broadcast(
         room,

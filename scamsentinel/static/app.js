@@ -8,7 +8,8 @@
   }
 
   const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
-  const CHUNK_MS = 4000;
+  // Longer chunks give Groq Whisper enough sentence context.
+  const CHUNK_MS = 8000;
 
   const state = {
     username: "",
@@ -87,7 +88,16 @@
         return;
       }
       try {
-        state.localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Preserve played recordings for server-side analysis. Browser echo
+      // cancellation/noise suppression can otherwise remove the MP3 voice.
+      state.localStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          channelCount: 1,
+        },
+      });
       } catch (err) {
         console.error("getUserMedia failed:", err);
         setConnText("Microphone access denied (" + err.name + ") — call cannot start.");
@@ -115,7 +125,7 @@
     $("voice-risk-bar").style.width = "0%";
     $("voice-risk-confidence").textContent = state.demo
       ? "Demo mode analyzes transcript text only — no live audio sample."
-      : "Listening for ~5s sample…";
+      : "Listening for known-script evidence…";
     $("reasons-list").innerHTML = '<li class="reasons-empty">No suspicious signals detected yet.</li>';
     $("alert-banner").classList.add("hidden");
     $("transcript-feed").innerHTML = "";
